@@ -70,28 +70,39 @@ class OpenAIVoiceClient(
     private val conversationHistory = mutableListOf<JSONObject>()
 
     private val systemInstructions = """
-        You are Aira, a swift, natural, warm, and highly intelligent personal AI assistant developed by Rauf.
+        You are Aira, a real-time conversational AI assistant powered by OpenAI.
         
-        CORE PERSONALITY & VOICE EXPERIENCE:
-        - You speak like a helpful, modern companion with low latency, clear phrasing, and zero robotic tone.
-        - You switch seamlessly between Hindi, English, and Hinglish naturally depending on the user's language:
-          * If user speaks Hindi: Respond naturally and respectfully in Hindi.
-          * If user speaks English: Respond smoothly in English.
-          * If user speaks Hinglish (e.g., "WhatsApp open karo", "Mummy ko call lagao", "Kaise ho Aira?"): Respond naturally in Hinglish.
+        VOICE & CONVERSATION STYLE (OpenAI Advanced Voice Quality):
+        - You speak naturally, warmly, intelligently, and conversationally, exactly like OpenAI's ChatGPT Voice mode.
+        - You have zero robotic stiffness. Your voice is expressive, friendly, and human-like.
         
-        CAPABILITIES:
-        - Conversational Q&A, reasoning, math, coding assistance, summarization, general knowledge, problem solving, creative ideas, translation, and everyday helpful tasks.
+        MULTILINGUAL MASTERY (HINDI, HINGLISH & ENGLISH):
+        - **Hinglish (Conversational Urban Hindi/Urdu written in Roman script)**:
+          * When the user talks in Hinglish (e.g. "Aira kaise ho?", "kuch accha sunao na", "aaj ka mausam kaisa hai?", "WhatsApp open karo", "Mummy ko call lagao", "kya chal raha hai", "mera mood thoda off hai"):
+            Reply naturally in friendly, fluent Hinglish using clean Roman script.
+            Example: "Main badhiya hoon! Aap batao, sab kaisa chal raha hai? Aaj main aapki kya help karun?"
+        - **Hindi (Devanagari Hindi)**:
+          * When the user talks in Hindi (e.g. "नमस्ते! आप कैसी हैं?"):
+            Reply in polite, natural, conversational Hindi with clear pronunciation and warm tone.
+            Example: "नमस्ते! मैं बिल्कुल ठीक हूँ। बताइए, आज मैं आपकी क्या सहायता करूँ?"
+        - **English**:
+          * When the user talks in English:
+            Reply in smooth, engaging, articulate conversational English.
+        - **Seamless Code-Switching**:
+          * Flow effortlessly between English, Hindi, and Hinglish based on how the user speaks to you.
+        
+        CONVERSATIONAL PACING:
+        - Keep spoken voice responses concise, conversational, and direct (1-3 sentences for general chat/queries unless detailed explanation is requested).
+        - Never use robotic formatting, bullet lists, asterisks (*), markdown hashes (#), or emoji codes in spoken audio output.
         
         DEVICE ACTIONS & TOOLS:
-        - You have native access to the Android device through the provided functions:
-          1. openWhatsApp(contactName): Launch WhatsApp or navigate to a chat.
-          2. makeCall(phoneNumber): Dial or call a specific telephone number.
-          3. callContact(contactName): Search device contacts and call Mom, Rahul, Doctor, etc.
-          4. openApp(appName): Open YouTube, Instagram, Camera, Chrome, Maps, Spotify, Calculator, Settings, etc.
-          5. openUrl(url): Open any website in the browser.
-        
-        - Call the appropriate tool IMMEDIATELY when the user asks you to perform an action.
-        - Keep spoken voice responses concise, conversational, and direct (1-3 sentences for simple questions unless deep explanation is requested).
+        - You have instant access to device actions:
+          1. openWhatsApp(contactName): Launch WhatsApp or jump to contact chat.
+          2. makeCall(phoneNumber): Dial or call a phone number directly.
+          3. callContact(contactName): Search and call contacts (Mom, Papa, Rahul, Doctor, etc.).
+          4. openApp(appName): Launch any app (YouTube, Instagram, Camera, Spotify, Maps, Settings, Chrome, etc.).
+          5. openUrl(url): Open websites in browser.
+        - Execute tools immediately whenever the user asks for an action in Hindi, Hinglish, or English.
     """.trimIndent()
 
     init {
@@ -102,8 +113,15 @@ class OpenAIVoiceClient(
         })
     }
 
+    fun updateApiKey(apiKey: String) {
+        val trimmed = apiKey.trim()
+        if (trimmed.isNotBlank() && !trimmed.startsWith("your_") && !trimmed.startsWith("MY_")) {
+            activeApiKey = trimmed
+        }
+    }
+
     fun connect(apiKey: String, voiceName: String = "alloy") {
-        activeApiKey = apiKey.trim()
+        updateApiKey(apiKey)
         currentVoice = voiceName
 
         if (isConnected) {
@@ -458,10 +476,14 @@ class OpenAIVoiceClient(
     /**
      * Processes user prompt through OpenAI Chat Completions / Realtime with tools
      */
-    fun processPrompt(prompt: String, onResponse: (String, ActionResult?) -> Unit) {
+    fun processPrompt(prompt: String, apiKey: String = "", onResponse: (String, ActionResult?) -> Unit) {
         scope.launch {
             val trimmed = prompt.trim()
             if (trimmed.isEmpty()) return@launch
+
+            if (apiKey.isNotBlank()) {
+                updateApiKey(apiKey)
+            }
 
             // Check quick local tool intent triggers for instantaneous response
             val localActionResult = checkDirectDeviceIntent(trimmed)
@@ -474,10 +496,12 @@ class OpenAIVoiceClient(
                 return@launch
             }
 
-            // Execute via OpenAI Chat Completions API with function calling
-            if (activeApiKey.isNotBlank() && !activeApiKey.startsWith("your_")) {
+            val keyToUse = if (activeApiKey.isNotBlank() && !activeApiKey.startsWith("your_")) activeApiKey else apiKey.trim()
+
+            // Execute via OpenAI Chat Completions API with function calling and multi-model resilience
+            if (keyToUse.isNotBlank() && !keyToUse.startsWith("your_")) {
                 try {
-                    val openAiResponse = executeOpenAiChatCompletion(trimmed)
+                    val openAiResponse = executeOpenAiChatCompletion(trimmed, keyToUse)
                     withContext(Dispatchers.Main) {
                         listener.onAiraTranscript(openAiResponse, true)
                         onResponse(openAiResponse, null)
@@ -497,7 +521,7 @@ class OpenAIVoiceClient(
         }
     }
 
-    private suspend fun executeOpenAiChatCompletion(prompt: String): String {
+    private suspend fun executeOpenAiChatCompletion(prompt: String, keyToUse: String): String {
         return withContext(Dispatchers.IO) {
             val userMsg = JSONObject().apply {
                 put("role", "user")
@@ -511,66 +535,79 @@ class OpenAIVoiceClient(
             val recent = conversationHistory.drop(1).takeLast(10)
             recent.forEach { messagesArray.put(it) }
 
-            val requestJson = JSONObject().apply {
-                put("model", "gpt-4o")
-                put("messages", messagesArray)
-                put("tools", buildToolsSchema())
-                put("tool_choice", "auto")
-                put("temperature", 0.7)
-                put("max_tokens", 500)
-            }
+            val candidateModels = listOf("gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo")
+            var lastException: Exception? = null
 
-            val request = Request.Builder()
-                .url(CHAT_COMPLETIONS_URL)
-                .addHeader("Authorization", "Bearer $activeApiKey")
-                .addHeader("Content-Type", "application/json")
-                .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-
-            val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                val errBody = response.body?.string() ?: ""
-                Log.e(TAG, "OpenAI error response: $errBody")
-                throw Exception("OpenAI API returned HTTP ${response.code}")
-            }
-
-            val resBody = response.body?.string() ?: ""
-            val json = JSONObject(resBody)
-            val choice = json.getJSONArray("choices").getJSONObject(0)
-            val messageObj = choice.getJSONObject("message")
-
-            // Check if tool/function calls were requested
-            if (messageObj.has("tool_calls")) {
-                val toolCalls = messageObj.getJSONArray("tool_calls")
-                if (toolCalls.length() > 0) {
-                    val toolCall = toolCalls.getJSONObject(0)
-                    val functionObj = toolCall.getJSONObject("function")
-                    val name = functionObj.getString("name")
-                    val argumentsStr = functionObj.optString("arguments", "{}")
-                    val arguments = try { JSONObject(argumentsStr) } catch (e: Exception) { JSONObject() }
-
-                    handleToolExecution(name, arguments, null, null)
-
-                    val actionSummary = when (name) {
-                        "openWhatsApp" -> "Opening WhatsApp on your device."
-                        "makeCall" -> "Dialing phone number ${arguments.optString("phoneNumber")}."
-                        "callContact" -> "Calling contact ${arguments.optString("contactName")}."
-                        "openApp" -> "Opening ${arguments.optString("appName")} for you."
-                        "openUrl" -> "Opening ${arguments.optString("url")} in browser."
-                        else -> "Action executed."
+            for (modelName in candidateModels) {
+                try {
+                    val requestJson = JSONObject().apply {
+                        put("model", modelName)
+                        put("messages", messagesArray)
+                        put("tools", buildToolsSchema())
+                        put("tool_choice", "auto")
+                        put("temperature", 0.7)
+                        put("max_tokens", 600)
                     }
-                    return@withContext actionSummary
+
+                    val request = Request.Builder()
+                        .url(CHAT_COMPLETIONS_URL)
+                        .addHeader("Authorization", "Bearer $keyToUse")
+                        .addHeader("Content-Type", "application/json")
+                        .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
+                        .build()
+
+                    val response = httpClient.newCall(request).execute()
+                    if (!response.isSuccessful) {
+                        val errBody = response.body?.string() ?: ""
+                        Log.w(TAG, "OpenAI model $modelName returned HTTP ${response.code}: $errBody")
+                        lastException = Exception("OpenAI model $modelName HTTP ${response.code}")
+                        continue // Try next model candidate
+                    }
+
+                    val resBody = response.body?.string() ?: ""
+                    val json = JSONObject(resBody)
+                    val choice = json.getJSONArray("choices").getJSONObject(0)
+                    val messageObj = choice.getJSONObject("message")
+
+                    // Check if tool/function calls were requested
+                    if (messageObj.has("tool_calls")) {
+                        val toolCalls = messageObj.getJSONArray("tool_calls")
+                        if (toolCalls.length() > 0) {
+                            val toolCall = toolCalls.getJSONObject(0)
+                            val functionObj = toolCall.getJSONObject("function")
+                            val name = functionObj.getString("name")
+                            val argumentsStr = functionObj.optString("arguments", "{}")
+                            val arguments = try { JSONObject(argumentsStr) } catch (e: Exception) { JSONObject() }
+
+                            handleToolExecution(name, arguments, null, null)
+
+                            val actionSummary = when (name) {
+                                "openWhatsApp" -> "Opening WhatsApp on your device."
+                                "makeCall" -> "Dialing phone number ${arguments.optString("phoneNumber")}."
+                                "callContact" -> "Calling contact ${arguments.optString("contactName")}."
+                                "openApp" -> "Opening ${arguments.optString("appName")} for you."
+                                "openUrl" -> "Opening ${arguments.optString("url")} in browser."
+                                else -> "Action executed."
+                            }
+                            return@withContext actionSummary
+                        }
+                    }
+
+                    val content = messageObj.optString("content", "")
+                    if (content.isNotBlank()) {
+                        conversationHistory.add(JSONObject().apply {
+                            put("role", "assistant")
+                            put("content", content)
+                        })
+                    }
+                    return@withContext content.ifBlank { "I understand. How else can I assist you?" }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error executing model $modelName: ${e.message}")
+                    lastException = e
                 }
             }
 
-            val content = messageObj.optString("content", "")
-            if (content.isNotBlank()) {
-                conversationHistory.add(JSONObject().apply {
-                    put("role", "assistant")
-                    put("content", content)
-                })
-            }
-            content.ifBlank { "I understand. How else can I assist you?" }
+            throw lastException ?: Exception("All OpenAI models failed to execute")
         }
     }
 

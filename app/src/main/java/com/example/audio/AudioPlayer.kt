@@ -71,14 +71,18 @@ class AudioPlayer(
         audioTrack?.play()
     }
 
+    private var idleJob: Job? = null
+
     private fun startPlaybackLoop() {
         playbackJob = scope.launch {
             for (pcmChunk in audioChannel) {
                 if (!isActive) break
 
                 if (audioTrack == null || audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
-                    initAudioTrack(DEFAULT_SAMPLE_RATE)
+                    initAudioTrack(currentSampleRate)
                 }
+
+                idleJob?.cancel()
 
                 if (!isPlaying) {
                     isPlaying = true
@@ -93,6 +97,16 @@ class AudioPlayer(
                     audioTrack?.write(pcmChunk, 0, pcmChunk.size)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error writing to AudioTrack", e)
+                }
+
+                // Launch idle timeout to detect end of audio stream
+                idleJob = scope.launch {
+                    kotlinx.coroutines.delay(400)
+                    if (isPlaying) {
+                        isPlaying = false
+                        onPlaybackStateChanged(false)
+                        onAmplitudeChanged(0f)
+                    }
                 }
             }
         }
@@ -109,6 +123,8 @@ class AudioPlayer(
      * Instantly stops playback and empties queued audio on interruption
      */
     fun interrupt() {
+        idleJob?.cancel()
+        idleJob = null
         // Drain channel
         while (true) {
             val polled = audioChannel.tryReceive().getOrNull() ?: break

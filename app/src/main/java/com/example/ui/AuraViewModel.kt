@@ -18,6 +18,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.ai.AiraVoiceListener
 import com.example.ai.OpenAIVoiceClient
 import com.example.audio.AiraVoiceSynthesizer
+import com.example.audio.AudioPlayer
 import com.example.audio.AudioRecorder
 import com.example.bridge.AndroidActionBridge
 import com.example.data.model.ActionBadge
@@ -52,6 +53,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
     private val wakeWordDetector = WakeWordDetector(application.applicationContext, this)
 
     private var voiceSynthesizer: AiraVoiceSynthesizer? = null
+    private var audioPlayer: AudioPlayer? = null
     private var liveSpeechRecognizer: SpeechRecognizer? = null
     private var isLiveRecognizerActive = false
     private var recognitionRestartJob: Job? = null
@@ -119,7 +121,6 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
             context = getApplication(),
             onPlaybackStarted = {
                 _voiceState.value = AssistantVoiceState.SPEAKING
-                _isAiraActivated.value = true
                 stopLiveSpeechRecognition() // Pause speech input while speaking to prevent echo
             },
             onPlaybackFinished = {
@@ -139,6 +140,28 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
     }
 
     private fun initAudio() {
+        audioPlayer = AudioPlayer(
+            onPlaybackStateChanged = { isPlaying ->
+                viewModelScope.launch(Dispatchers.Main) {
+                    if (isPlaying) {
+                        _voiceState.value = AssistantVoiceState.SPEAKING
+                        stopLiveSpeechRecognition()
+                    } else {
+                        if (_voiceState.value == AssistantVoiceState.SPEAKING) {
+                            _voiceState.value = AssistantVoiceState.LISTENING
+                            _statusBanner.value = "Listening to you..."
+                            startLiveSpeechRecognition()
+                        }
+                    }
+                }
+            },
+            onAmplitudeChanged = { amp ->
+                if (_voiceState.value == AssistantVoiceState.SPEAKING) {
+                    _visualizerAmplitude.value = amp
+                }
+            }
+        )
+
         audioRecorder = AudioRecorder(
             onAudioChunk = { chunk ->
                 if (_voiceState.value != AssistantVoiceState.DISCONNECTED && _isMicEnabled.value) {
@@ -187,7 +210,6 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
         val apiKey = preferences.getEffectiveApiKey()
         _voiceState.value = AssistantVoiceState.CONNECTING
         _statusBanner.value = "Connecting to Aira Realtime Engine..."
-        triggerActivationAnimation()
 
         // Temporarily pause background wake word during active live session
         wakeWordDetector.pause()
@@ -203,6 +225,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
     fun stopLiveSession() {
         stopLiveSpeechRecognition()
         audioRecorder?.stop()
+        audioPlayer?.interrupt()
         voiceSynthesizer?.stop()
         openAIClient.disconnect()
         _voiceState.value = AssistantVoiceState.DISCONNECTED
@@ -255,7 +278,6 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
         _currentUserText.value = trimmed
         _voiceState.value = AssistantVoiceState.THINKING
         _statusBanner.value = "Aira is thinking..."
-        triggerActivationAnimation()
 
         val userMsg = ChatMessage(
             sender = MessageSender.USER,
@@ -267,8 +289,10 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
     }
 
     private fun processUserQuery(query: String) {
+        val apiKey = preferences.getEffectiveApiKey()
+        openAIClient.updateApiKey(apiKey)
         viewModelScope.launch(Dispatchers.IO) {
-            openAIClient.processPrompt(query) { answer, actionResult ->
+            openAIClient.processPrompt(query, apiKey) { answer, actionResult ->
                 viewModelScope.launch(Dispatchers.Main) {
                     val airaMsg = ChatMessage(
                         sender = MessageSender.AIRA,
@@ -278,8 +302,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
                     _messages.value = _messages.value + airaMsg
                     _currentAiraText.value = ""
 
-                    // Speak the answer aloud
-                    val apiKey = preferences.getEffectiveApiKey()
+                    // Speak the answer aloud using OpenAI Neural Voice
                     _voiceState.value = AssistantVoiceState.SPEAKING
                     _statusBanner.value = "Aira speaking..."
                     voiceSynthesizer?.speak(answer, apiKey, preferences.voice.value)
@@ -461,6 +484,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
 
     fun setCustomApiKey(key: String) {
         preferences.setCustomApiKey(key)
+        openAIClient.updateApiKey(key)
         _statusBanner.value = "OpenAI API key configured"
     }
 
@@ -502,7 +526,6 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
         viewModelScope.launch(Dispatchers.Main) {
             _voiceState.value = AssistantVoiceState.LISTENING
             _statusBanner.value = "Aira Live Session • Listening"
-            _isAiraActivated.value = true
             if (_isMicEnabled.value) {
                 audioRecorder?.start()
                 startLiveSpeechRecognition()
@@ -543,12 +566,15 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
     }
 
     override fun onAudioChunkReceived(pcmData: ByteArray, sampleRate: Int) {
-        // Realtime PCM chunk received from WebSocket
-        _voiceState.value = AssistantVoiceState.SPEAKING
+        viewModelScope.launch(Dispatchers.Main) {
+            _voiceState.value = AssistantVoiceState.SPEAKING
+            audioPlayer?.playChunk(pcmData, sampleRate)
+        }
     }
 
     override fun onInterrupted() {
         viewModelScope.launch(Dispatchers.Main) {
+            audioPlayer?.interrupt()
             voiceSynthesizer?.stop()
             openAIClient.interrupt()
             _voiceState.value = AssistantVoiceState.LISTENING
@@ -599,6 +625,8 @@ class AuraViewModel(application: Application) : AndroidViewModel(application), A
         }
         stopLiveSpeechRecognition()
         audioRecorder?.stop()
+        audioPlayer?.release()
+        audioPlayer = null
         voiceSynthesizer?.release()
         openAIClient.disconnect()
         wakeWordDetector.stopListening()
