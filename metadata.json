@@ -1,0 +1,6 @@
+{
+  "name": "Aura AI Assistant",
+  "description": "Multilingual AI Voice Assistant Aira developed by Rauf with OpenAI Realtime voice engine and native Android device actions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
